@@ -47,14 +47,58 @@ class game:
         self.wave = 1
         self.game_over = False
         self.boss = None
-        self.boss_timer = 0
         self.shake = 0
         self.flash = 0
         self.paused = False
         self.shop = False
         self.spawn_cd = 1.0
         self.powerup_cd = 6.0
+        self.wave_left = 0
+        self.wave_total = 0
+        self.break_timer = 0
+        self.banner = ""
+        self.banner_t = 0
+        self.combo = 1
+        self.combo_t = 0
         self.owned = {"rapid": False, "boots": False, "shield": False,  "bomb": False, "laser": False, "drone": False}
+        self.start_wave()
+
+    def wave_config(self, w):
+        boss = w % 3 == 0
+        return {
+            "boss": boss,
+            "count": (5 + w//2) if boss else 4 + int(w*1.7),
+            "tank_chance": max(0.0, (w-3)*0.09),         
+            "fast_chance": max(0.0, (w-2)*0.13),
+            "seeker_chance": max(0.0, (w-5)*0.08),
+            "speed_mul": 0.5 + min(1.5, (w-1)*0.18), 
+            "fire_every": 0 if w < 2 else max(0.45, 2.6-w*0.22),
+            "hp_bonus": max(0, w-4),
+        }
+
+    def start_wave(self):
+        c = self.wave_config(self.wave)
+        self.wave_left = c["count"]
+        self.wave_total = c["count"]
+        self.banner = ("WAVE %d - BOSS" % self.wave) if c["boss"] else ("WAVE %d" % self.wave)
+        self.banner_t = 2.0
+        self.spawn_cd = 0.6
+        if c["boss"]:
+            self.spawn_boss()
+
+    def wave_clear(self):
+        bonus = 25 + self.wave*10
+        self.score += self.wave*100
+        self.gold += bonus
+        self.popup(self.player["x"]+16, self.player["y"]-40, "WAVE CLEAR +%dg" % bonus, "lime")
+        self.explode(self.player["x"]+16, self.player["y"], "lime", 25, size=3, shake=4)
+        if self.wave % 5 == 0:
+            self.lives += 1
+            self.popup(self.player["x"]+16, self.player["y"]-60, "+1 LIFE", "lime")
+        self.wave += 1
+        self.break_timer = 2.0
+        self.banner = "NEXT WAVE IN 2..."
+        self.banner_t = 2.0
 
     def key_press(self,event):
         self.pressed.add(event.keysym)
@@ -177,6 +221,7 @@ class game:
             self.update(dt)
         self.draw()
         self.root.after(16, self.loop)
+
     def update(self, dt):
         p = self.player
         if p["alive"] and not self.shop and not self.game_over:
@@ -195,46 +240,58 @@ class game:
                 p["shield"] = 1
             self.trails.append({"x": p["x"]+16, "y": p["y"]+16, "life": 0.35, "max": 0.35})
             self.update_drones(dt)
-        self.spawn_cd -= dt
-        if self.spawn_cd <= 0 and self.boss is None:
-            self.spawn_cd = max(0.18, 0.85 - self.wave*0.06)
-            self.spawn_enemy()
-            if self.wave > 3 and random.random() < 0.4:
+        if self.break_timer > 0:
+            self.break_timer -= dt
+            if self.break_timer <= 0:
+                self.break_timer = 0
+                self.start_wave()
+        else:
+            self.spawn_cd -= dt
+            if self.spawn_cd <= 0 and self.wave_left > 0:
+                self.spawn_cd = max(0.25, 1.3 - self.wave*0.07)   
                 self.spawn_enemy()
+                self.wave_left -= 1
+            if self.wave_left <= 0 and len(self.enemies) == 0 and not self.game_over:
+                self.wave_clear()
         self.powerup_cd -= dt
         if self.powerup_cd <= 0:
             self.powerup_cd = random.uniform(6, 11)
             self.spawn_powerup()
-        if self.boss is None and self.wave % 3 == 0 and self.boss_timer <= 0:
-            self.spawn_boss()
         if self.boss is not None:
             self.boss["cd"] = self.boss.get("cd", 60) - dt
             if self.boss["cd"] <= 0:
                 self.boss["cd"] = 1.6
                 self.boss_shoot()
-        self.boss_timer = max(0, self.boss_timer - dt)
-
+        self.banner_t = max(0, self.banner_t - dt)
         for b in list(self.bullets):
             b["x"] += b["dx"]; b["y"] += b["dy"]
             if b["y"] < 0 or b["x"] < 0 or b["x"] > WIDTH:
                 self.bullets.remove(b)
         for b in list(self.ebullets):
+            if b.get("homing", 0) > 0:
+                b["homing"] -= dt
+                a = math.atan2(p["y"]+16-b["y"], p["x"]+16-b["x"])
+                b["dx"] += math.cos(a)*18*dt
+                b["dy"] += math.sin(a)*18*dt
+                n = math.hypot(b["dx"], b["dy"])
+                if n > 0:
+                    b["dx"] = b["dx"]/n*3.4
+                    b["dy"] = b["dy"]/n*3.4
             b["x"] += b["dx"]; b["y"] += b["dy"]
             if b["y"] < 0 or b["y"] > HEIGHT or b["x"] < 0 or b["x"] > WIDTH:
                 self.ebullets.remove(b)
-
         for e in list(self.enemies):
             if e.get("type") == "boss":
                 e["x"] += e.get("vx", 1.4)
                 if e["x"] < 80 or e["x"] > WIDTH-80: e["vx"] *= -1
                 e["y"] = min(90, e["y"] + 1.2)
             else:
-                e["y"] += e.get("speed", 2) * (1 + self.wave*0.04)
-                if e["x"] < 0 or e["x"] > WIDTH-40: e["vx"] = -e.get("vx", 0)
+                e["y"] += e.get("speed", 2)
+                if e["x"] < 0 or e["x"] > WIDTH-e.get("w",32): e["vx"] = -e.get("vx", 0)
                 e["x"] += e.get("vx", 0)
             e["cd"] = e.get("cd", 0) - dt
-            if e["cd"] <= 0 and e["y"] > 0:
-                e["cd"] = e.get("fire", 3.0) * random.uniform(0.7, 1.4)
+            if e["cd"] <= 0 and e["y"] > 0 and e.get("fire", 0):
+                e["cd"] = e["fire"] * random.uniform(0.7, 1.4)
                 self.enemy_shoot(e)
             if e.get("type") != "boss" and e["y"] > HEIGHT:
                 self.enemies.remove(e); continue
@@ -290,21 +347,26 @@ class game:
             self.explode(cx, cy, "magenta", 90, size=6, shake=16)
             self.flash = 1
             self.popup(cx-40, cy, "+1000", "gold")
-            self.boss_timer = 6
-            self.wave += 1
         else:
-            self.score+= e.get("score", 10)
+            self.combo = min(6, self.combo+1)
+            self.combo_t = 3.0
+            self.score += e.get("score", 10) * self.combo
             self.gold += e.get("gold", 5)
             self.explode(cx, cy, e.get("color", "red"), 24, size=3, shake=3)
             self.popup(e["x"], e["y"], f"+{e.get('gold',5)}g", "yellow")
-            if e.get("type") =="tank":
-                self.score+= 15
+            if self.combo > 1:
+                self.popup(e["x"]+20, e["y"]-20, "x%d" % self.combo, "orange")
+            if e.get("type") == "tank":
+                self.score += 15
 
     def enemy_shoot(self, e):
         cx = e["x"] + e.get("w",32)/2
         cy = e["y"] + e.get("h",32)/2
         ang = math.atan2(self.player["y"]+16-cy, self.player["x"]+16-cx)
         self.ebullets.append({"x": cx-3, "y": cy, "dx": math.cos(ang)*4.2, "dy": math.sin(ang)*4.2, "size": 6, "color": "red"})
+        if e.get("type") == "seeker":
+            scat = ang + random.uniform(-1.1, 1.1)
+            self.ebullets.append({"x": cx-4, "y": cy, "dx": math.cos(scat)*1.6, "dy": math.sin(scat)*1.6, "size": 7, "color": "violet", "homing": 1.0})
         if e.get("type") == "boss":
             for off in (-0.3, 0.3):
                 a = ang + off
@@ -321,8 +383,8 @@ class game:
 
     def update_powerups(self, dt):
         for pw in list(self.powerups):
-            pw["y"] += pw ["speed"]
-            if pw ["y"] > HEIGHT:
+            pw["y"] += pw["speed"]
+            if pw["y"] > HEIGHT:
                 self.powerups.remove(pw); continue
             p = self.player
             if p["x"] < pw["x"]+32 and p["x"]+32 > pw["x"] and p["y"] < pw["y"]+32 and p["y"]+32 > pw["y"]:
@@ -362,6 +424,8 @@ class game:
             if self.laser["life"] <= 0: self.laser = None
         self.shake = max(0, self.shake - dt*30)
         self.flash = max(0, self.flash - dt*3)
+        self.combo_t = max(0, self.combo_t - dt)
+        if self.combo_t <= 0: self.combo = 1
 
     def player_hit(self):
         p = self.player
@@ -370,6 +434,7 @@ class game:
         self.flash = 1
         p["alive"] = False
         self.lives -= 1
+        self.combo = 1
         if self.lives <= 0:
             self.game_over = True
             return
@@ -379,19 +444,29 @@ class game:
         self.ebullets.clear()
 
     def spawn_enemy(self, force=None):
-        t = force or random.choice(["normal","normal","fast","tank","boss"])
+        c = self.wave_config(self.wave)
+        t = force
+        if t is None:
+            r = random.random()
+            t = "normal"
+            if r < c["tank_chance"]: t = "tank"
+            elif r < c["tank_chance"]+c["fast_chance"]: t = "fast"
+            elif r < c["tank_chance"]+c["fast_chance"]+c["seeker_chance"]: t = "seeker"
+        fire = c["fire_every"]
         if t == "normal":
-            self.enemies.append({"x": random.random()*(WIDTH-32), "y": -32, "w": 32, "h": 32, "hp" : 1, "speed": random.random()*2+2, "vx": 0, "cd": 3, "fire":3.5, "type": None, "color": "red", "score": 10, "gold": 5})
+            self.enemies.append({"x": random.random()*(WIDTH-32), "y": -32, "w": 32, "h": 32, "hp": 1+c["hp_bonus"], "speed": (1.5+random.random()*1.5)*c["speed_mul"], "vx": 0, "cd": random.uniform(1.5,3.5) if fire else 999, "fire": fire, "type": None, "color": "red", "score": 10, "gold": 5})
         elif t == "fast":
-            self.enemies.append({"x": random.random()*(WIDTH-24), "y":-24, "w": 24, "h": 24, "hp": 1, "speed": random.random()*2+5, "vx": random.choice([-1,1])*0.8, "cd": 2.5, "fire": 2.0, "type": "fast", "color": "orange", "score": 20, "gold": 8})
+            self.enemies.append({"x": random.random()*(WIDTH-24), "y":-24, "w": 24, "h": 24, "hp": 1+c["hp_bonus"], "speed": (3+random.random()*2)*c["speed_mul"], "vx": random.choice([-1,1])*0.8, "cd": random.uniform(2,4) if fire else 999, "fire": fire, "type": "fast", "color": "orange", "score": 20, "gold": 8})
         elif t == "tank":
-            self.enemies.append({"x": random.random()*(WIDTH-48), "y": -44, "w": 48, "h": 44, "hp": 6, "speed": random.random()+1.2, "vx": 0, "cd": 2, "fire": 2, "type": "tank", "color": "maroon", "score": 40, "gold": 15})
+            self.enemies.append({"x": random.random()*(WIDTH-48), "y": -44, "w": 48, "h": 44, "hp": 6+c["hp_bonus"]*2, "speed": (0.9+random.random()*0.6)*c["speed_mul"], "vx": 0, "cd": random.uniform(2,3.5) if fire else 999, "fire": fire, "type": "tank", "color": "maroon", "score": 40, "gold": 15})
+        elif t == "seeker":
+            self.enemies.append({"x": random.random()*(WIDTH-30), "y": -30, "w": 30, "h": 30, "hp": 3+c["hp_bonus"], "speed": (1.2+random.random()*0.8)*c["speed_mul"], "vx": 0, "cd": random.uniform(2,3.5) if fire else 999, "fire": 3.0, "type": "seeker", "color": "blue", "score": 30, "gold": 12})
         elif t == "minion":
-            self.enemies.append({"x": random.random()*(WIDTH-28), "y": -28, "w": 28, "h": 28, "hp": 1, "speed": 3.5, "vx": 0, "cd": 2, "fire": 2, "type": "minion", "color": "darkorange", "score": 5, "gold":3})
+            self.enemies.append({"x": random.random()*(WIDTH-28), "y": -28, "w": 28, "h": 28, "hp": 1, "speed": 2.5+self.wave*0.1, "vx": 0, "cd": 2.5, "fire": 3, "type": "minion", "color": "darkorange", "score": 5, "gold": 3})
 
     def spawn_boss(self):
-        hp = 300 + self.wave*60
-        self.boss = {"x": WIDTH//2-70, "y": -140, "w": 140, "h": 90, "speed": 1, "hp": hp, "maxhp": hp, "type": "boss", "vx": 1.6, "color": "purple", "score": 1000, "gold": 200, "cd": 3}
+        hp = 200 + self.wave*70
+        self.boss = {"x": WIDTH//2-70, "y": -140, "w": 140, "h": 90, "speed": 1, "hp": hp, "maxhp": hp, "type": "boss", "vx": 1.2+self.wave*0.05, "color": "purple", "score": 1000, "gold": 200, "cd": 3}
         self.enemies.append(self.boss)
 
     def spawn_powerup(self):
@@ -418,19 +493,22 @@ class game:
             rr = max(1, p["r"]*p["life"]/p["max"])
             c.create_oval(p["x"]+ox-rr, p["y"]+oy-rr, p["x"]+ox+rr, p["y"]+oy+rr, fill=p["color"], outline="")
         if self.laser:
-            c.create_rectangle(self.laser["x"]+ox-16-16, 0, self.laser["x"]+ox+16, self.laser["y"]+oy, fill="cyan", outline="")
+            c.create_rectangle(self.laser["x"]+ox-32, 0, self.laser["x"]+ox+32, self.laser["y"]+oy, fill="cyan", outline="")
         p = self.player
         if p["alive"]:
             col = "cyan" if (self.owned["shield"] and p["shield"] > 0) else "blue"
-            if p["iframes"] >0 and int(p["iframes"]*10) % 2 == 0:
+            if p["iframes"] > 0 and int(p["iframes"]*10) % 2 == 0:
                 col = "gray60"
             c.create_rectangle(p["x"]+ox, p["y"]+oy, p["x"]+ox+32, p["y"]+oy+32, fill=col)
+            if self.owned["shield"] and p["shield"] > 0:
+                c.create_oval(p["x"]+ox-6, p["y"]+oy-6, p["x"]+ox+38, p["y"]+oy+38, outline="cyan", width=2)
         for d in self.drones:
             c.create_oval(d["x"]+ox-7, d["y"]+oy-7, d["x"]+ox+7, d["y"]+oy+7, fill="magenta", outline="white")
         for b in self.bullets:
             c.create_oval(b["x"]+ox, b["y"]+oy, b["x"]+ox+b["size"], b["y"]+oy+b["size"], fill=b["color"])
         for b in self.ebullets:
-            c.create_oval(b["x"]+ox-4, b["y"]+oy-4, b["x"]+ox+4, b["y"]+oy+4, fill=b["color"], outline="white")
+            r = 6 if b.get("homing", 0) > 0 else 4
+            c.create_oval(b["x"]+ox-r, b["y"]+oy-r, b["x"]+ox+r, b["y"]+oy+r, fill=b["color"], outline="white")
         for e in self.enemies:
             c.create_rectangle(e["x"]+ox, e["y"]+oy, e["x"]+ox+e["w"], e["y"]+oy+e["h"], fill=e.get("color","red"), outline="white")
             if e.get("type") == "boss":
@@ -438,6 +516,9 @@ class game:
                 c.create_rectangle(e["x"]+ox, e["y"]+oy-10, e["x"]+ox+e["w"], e["y"]+oy-5, fill="gray40", outline="white")
                 c.create_rectangle(e["x"]+ox, e["y"]+oy-10, e["x"]+ox+e["w"]*fr, e["y"]+oy-5, fill="magenta", outline="")
                 c.create_text(e["x"]+ox+e["w"]/2, e["y"]+oy+e["h"]/2, text="BOSS", fill="white", font=("Arial", 14, "bold"))
+            elif e.get("hp", 1) > 1:
+                c.create_rectangle(e["x"]+ox, e["y"]+oy-6, e["x"]+ox+e["w"], e["y"]+oy-3, fill="gray40", outline="")
+                c.create_rectangle(e["x"]+ox, e["y"]+oy-6, e["x"]+ox+e["w"]*(e["hp"]/e["hp"]), e["y"]+oy-3, fill="red", outline="")
         for t in self.texts:
             c.create_text(t["x"]+ox, t["y"]+oy, text=t["text"], fill=t["color"], font=("Arial", 14, "bold"))
         for pw in self.powerups:
@@ -448,16 +529,20 @@ class game:
         c.create_text(10,16,anchor="nw",text=f"score: {self.score}",fill="white")
         c.create_text(10,36,anchor="nw",text=f"gold: {self.gold}", fill="gold")
         c.create_text(10,56,anchor="nw",text=f"lives: {self.lives}",fill="white")
-        c.create_text(10,76,anchor="nw",text=f"wave: {self.wave}",fill="white")
+        c.create_text(10,76,anchor="nw",text=f"wave: {self.wave}   enemies left: {self.wave_left+len(self.enemies)}",fill="white")
         c.create_text(WIDTH-10,16,anchor="ne",text="B = SHOP",fill="cyan",font=("Arial",12,"bold"))
         c.create_text(WIDTH-10,36,anchor="ne",text="1 bomb | 2 laser",fill="gray70")
         c.create_text(WIDTH-10,56,anchor="ne",text=" | ".join(k for k,v in self.owned.items()if v) or "no upgrades", fill="gray60")
+        if self.combo > 1:
+            c.create_text(WIDTH//2, 100, text="x%d combo" % self.combo, fill="orange", font=("Arial", 16, "bold"))
         c.create_text(WIDTH//2, HEIGHT-14, text="1 hit = death | arrows move | space to shoot | press b for shop | p for pause", fill="white", font=("Arial", 13))
+        if self.banner_t > 0:
+            c.create_text(WIDTH//2, HEIGHT//2-70, text=self.banner, fill="lime", font=("Arial", 24, "bold"))
         if self.paused:
             c.create_text(WIDTH//2, HEIGHT//2, text="paused(p)", fill="yellow", font=("Arial", 26))
         if self.game_over:
             c.create_text(WIDTH//2, HEIGHT//2, text="game over", fill="red", font=("Arial", 30))
-            c.create_text(WIDTH//2, HEIGHT//2+40, text=f"score{self.score} gold{self.gold}  -press r to restart", fill="white", font=("Arial", 13))
+            c.create_text(WIDTH//2, HEIGHT//2+40, text=f"score:{self.score} gold:{self.gold}  -press r to restart", fill="white", font=("Arial", 13))
         if self.shop:
             self.draw_shop()
 
